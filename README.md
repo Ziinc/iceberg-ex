@@ -5,7 +5,7 @@
 Rustler NIF.
 
 - Catalogs: Iceberg REST, Amazon S3 Tables, in-memory
-- Tables: create (unpartitioned) and load, with their metadata
+- Namespaces and tables: create (unpartitioned), list, load, rename, drop
 - Scans with column selection, row filters and time travel, as Arrow IPC or an
   `Explorer.DataFrame`
 - Appends: Parquet data files written separately from the commit, then
