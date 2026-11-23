@@ -12,11 +12,14 @@ defmodule Iceberg.TestHelpers do
   end
 
   def events_schema do
-    Iceberg.Schema.new([
-      {"id", :long, required: true},
-      {"name", :string},
-      {"ts", :timestamptz}
-    ])
+    %{
+      "type" => "struct",
+      "fields" => [
+        %{"id" => 1, "name" => "id", "required" => true, "type" => "long"},
+        %{"id" => 2, "name" => "name", "required" => false, "type" => "string"},
+        %{"id" => 3, "name" => "ts", "required" => false, "type" => "timestamptz"}
+      ]
+    }
   end
 
   def events(ids) do

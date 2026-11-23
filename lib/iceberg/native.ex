@@ -41,31 +41,9 @@ defmodule Iceberg.Native do
   end
 
   def catalog_new(_ref, _timeout, _kind, _name, _props), do: err()
-  def list_namespaces(_ref, _timeout, _catalog, _parent), do: err()
   def create_namespace(_ref, _timeout, _catalog, _ns, _props), do: err()
-  def get_namespace(_ref, _timeout, _catalog, _ns), do: err()
-  def namespace_exists(_ref, _timeout, _catalog, _ns), do: err()
-  def drop_namespace(_ref, _timeout, _catalog, _ns), do: err()
-  def list_tables(_ref, _timeout, _catalog, _ns), do: err()
-
-  def create_table(
-        _ref,
-        _timeout,
-        _catalog,
-        _ns,
-        _name,
-        _schema,
-        _partition,
-        _props,
-        _location,
-        _fv
-      ),
-      do: err()
-
+  def create_table(_ref, _timeout, _catalog, _ns, _name, _schema, _props), do: err()
   def load_table(_ref, _timeout, _catalog, _ns, _name), do: err()
-  def table_exists(_ref, _timeout, _catalog, _ns, _name), do: err()
-  def drop_table(_ref, _timeout, _catalog, _ns, _name), do: err()
-  def rename_table(_ref, _timeout, _catalog, _from_ns, _from, _to_ns, _to), do: err()
 
   def table_metadata(_table), do: err()
   def table_refresh(_ref, _timeout, _table), do: err()

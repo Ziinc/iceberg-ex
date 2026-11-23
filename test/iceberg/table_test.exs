@@ -124,23 +124,6 @@ defmodule Iceberg.TableTest do
     assert {:error, %Error{kind: :data_invalid}} = Table.append(table, "not arrow")
   end
 
-  test "partitioned tables are written one file per partition", %{catalog: catalog} do
-    {:ok, table} =
-      Catalog.create_table(catalog, "analytics", "parted", events_schema(),
-        partition_by: ["name"]
-      )
-
-    assert {:ok, %DataFiles{files: files} = data_files} =
-             Table.write_data_files(table, events([1, 2, 3]))
-
-    assert length(files) == 3
-    assert Enum.all?(files, &(&1.path =~ ~r{/data/name=n\d/}))
-
-    {:ok, table} = Table.fast_append(table, data_files)
-    {:ok, ipc} = Table.scan(table, filter: {:==, "name", "n2"})
-    assert ids(ipc) == [2]
-  end
-
   test "to_dataframe/2 loads a scan into Explorer", %{table: table} do
     {:ok, table} = Table.append(table, events([1]))
     assert {:ok, df} = Table.to_dataframe(table, select: ["id", "name"])

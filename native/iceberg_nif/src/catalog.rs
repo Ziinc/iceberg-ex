@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use iceberg::memory::MemoryCatalogBuilder;
-use iceberg::spec::{FormatVersion, Schema, Transform, UnboundPartitionSpec};
+use iceberg::spec::Schema;
 use iceberg::{Catalog, CatalogBuilder, NamespaceIdent, TableCreation, TableIdent};
 use iceberg_catalog_rest::RestCatalogBuilder;
 use iceberg_catalog_s3tables::S3TablesCatalogBuilder;
@@ -83,24 +83,6 @@ fn catalog_new(
 }
 
 #[rustler::nif]
-fn list_namespaces(
-    env: Env,
-    r: Term,
-    timeout: Option<u64>,
-    c: CatalogArc,
-    parent: Option<Vec<String>>,
-) -> Atom {
-    spawn(env, r, timeout, async move {
-        let parent = parent.map(ns).transpose()?;
-        let list = c.0.list_namespaces(parent.as_ref()).await?;
-        Ok(list
-            .into_iter()
-            .map(NamespaceIdent::inner)
-            .collect::<Vec<_>>())
-    })
-}
-
-#[rustler::nif]
 fn create_namespace(
     env: Env,
     r: Term,
@@ -115,64 +97,7 @@ fn create_namespace(
     })
 }
 
-#[rustler::nif]
-fn get_namespace(
-    env: Env,
-    r: Term,
-    timeout: Option<u64>,
-    c: CatalogArc,
-    levels: Vec<String>,
-) -> Atom {
-    spawn(env, r, timeout, async move {
-        Ok(c.0.get_namespace(&ns(levels)?).await?.properties().clone())
-    })
-}
-
-#[rustler::nif]
-fn namespace_exists(
-    env: Env,
-    r: Term,
-    timeout: Option<u64>,
-    c: CatalogArc,
-    levels: Vec<String>,
-) -> Atom {
-    spawn(env, r, timeout, async move {
-        Ok(c.0.namespace_exists(&ns(levels)?).await?)
-    })
-}
-
-#[rustler::nif]
-fn drop_namespace(
-    env: Env,
-    r: Term,
-    timeout: Option<u64>,
-    c: CatalogArc,
-    levels: Vec<String>,
-) -> Atom {
-    spawn(env, r, timeout, async move {
-        c.0.drop_namespace(&ns(levels)?).await?;
-        Ok(atoms::ok())
-    })
-}
-
-#[rustler::nif]
-fn list_tables(
-    env: Env,
-    r: Term,
-    timeout: Option<u64>,
-    c: CatalogArc,
-    levels: Vec<String>,
-) -> Atom {
-    spawn(env, r, timeout, async move {
-        let tables = c.0.list_tables(&ns(levels)?).await?;
-        Ok(tables
-            .into_iter()
-            .map(|t| t.name().to_string())
-            .collect::<Vec<_>>())
-    })
-}
-
-/// `partition` holds `{source column, partition field name, transform}`.
+/// Creates an unpartitioned table; `schema` is in the spec's JSON shape.
 #[rustler::nif]
 #[allow(clippy::too_many_arguments)]
 fn create_table(
@@ -183,49 +108,20 @@ fn create_table(
     levels: Vec<String>,
     name: String,
     schema: Term,
-    partition: Vec<(String, String, String)>,
     props: HashMap<String, String>,
-    location: Option<String>,
-    format_version: Option<u8>,
 ) -> NifResult<Atom> {
     let schema = term::to_json(schema)?;
     Ok(spawn(env, r, timeout, async move {
         let schema: Schema = serde_json::from_value(schema)
             .map_err(|e| Error::invalid(format!("invalid schema: {e}")))?;
-        let format_version = match format_version {
-            None | Some(2) => FormatVersion::V2,
-            Some(1) => FormatVersion::V1,
-            Some(3) => FormatVersion::V3,
-            Some(v) => return Err(Error::invalid(format!("unknown format version {v}"))),
-        };
         let creation = TableCreation::builder()
             .name(name)
-            .partition_spec_opt(partition_spec(&schema, &partition)?)
             .schema(schema)
             .properties(props)
-            .location_opt(location)
-            .format_version(format_version)
             .build();
         let table = c.0.create_table(&ns(levels)?, creation).await?;
         Ok(TableResource::new(c.0.clone(), table))
     }))
-}
-
-fn partition_spec(
-    schema: &Schema,
-    fields: &[(String, String, String)],
-) -> Result<Option<UnboundPartitionSpec>, Error> {
-    if fields.is_empty() {
-        return Ok(None);
-    }
-    let mut spec = UnboundPartitionSpec::builder();
-    for (source, name, transform) in fields {
-        let field = schema
-            .field_by_name(source)
-            .ok_or_else(|| Error::invalid(format!("unknown partition source column {source}")))?;
-        spec = spec.add_partition_field(field.id, name, transform.parse::<Transform>()?)?;
-    }
-    Ok(Some(spec.build()))
 }
 
 #[rustler::nif]
@@ -240,53 +136,5 @@ fn load_table(
     spawn(env, r, timeout, async move {
         let table = c.0.load_table(&ident(levels, name)?).await?;
         Ok(TableResource::new(c.0.clone(), table))
-    })
-}
-
-#[rustler::nif]
-fn table_exists(
-    env: Env,
-    r: Term,
-    timeout: Option<u64>,
-    c: CatalogArc,
-    levels: Vec<String>,
-    name: String,
-) -> Atom {
-    spawn(env, r, timeout, async move {
-        Ok(c.0.table_exists(&ident(levels, name)?).await?)
-    })
-}
-
-#[rustler::nif]
-fn drop_table(
-    env: Env,
-    r: Term,
-    timeout: Option<u64>,
-    c: CatalogArc,
-    levels: Vec<String>,
-    name: String,
-) -> Atom {
-    spawn(env, r, timeout, async move {
-        c.0.drop_table(&ident(levels, name)?).await?;
-        Ok(atoms::ok())
-    })
-}
-
-#[rustler::nif]
-#[allow(clippy::too_many_arguments)]
-fn rename_table(
-    env: Env,
-    r: Term,
-    timeout: Option<u64>,
-    c: CatalogArc,
-    from_levels: Vec<String>,
-    from: String,
-    to_levels: Vec<String>,
-    to: String,
-) -> Atom {
-    spawn(env, r, timeout, async move {
-        c.0.rename_table(&ident(from_levels, from)?, &ident(to_levels, to)?)
-            .await?;
-        Ok(atoms::ok())
     })
 }
