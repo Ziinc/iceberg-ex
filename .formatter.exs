@@ -1,1 +1,1 @@
-[inputs: ["{mix,.formatter}.exs", "{config,lib,test}/**/*.{ex,exs}"]]
+[import_deps: [:stream_data], inputs: ["{mix,.formatter}.exs", "{config,lib,test}/**/*.{ex,exs}"]]

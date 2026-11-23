@@ -24,7 +24,8 @@ defmodule Iceberg.MixProject do
       {:rustler_precompiled, "~> 0.8"},
       {:rustler, "~> 0.38", optional: true},
       {:explorer, "~> 0.11", optional: true},
-      {:ex_doc, "~> 0.34", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      {:stream_data, "~> 1.1", only: [:dev, :test]}
     ]
   end
 
