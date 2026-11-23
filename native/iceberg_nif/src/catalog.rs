@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use iceberg::memory::MemoryCatalogBuilder;
-use iceberg::spec::Schema;
+use iceberg::spec::{FormatVersion, Schema, Transform, UnboundPartitionSpec};
 use iceberg::{Catalog, CatalogBuilder, NamespaceIdent, TableCreation, TableIdent};
 use iceberg_catalog_rest::RestCatalogBuilder;
 use iceberg_catalog_s3tables::S3TablesCatalogBuilder;
@@ -173,7 +173,6 @@ fn list_tables(
 }
 
 /// `partition` holds `{source column, partition field name, transform}`.
-/// Creates an unpartitioned table; `schema` is in the spec's JSON shape.
 #[rustler::nif]
 #[allow(clippy::too_many_arguments)]
 fn create_table(
@@ -184,20 +183,49 @@ fn create_table(
     levels: Vec<String>,
     name: String,
     schema: Term,
+    partition: Vec<(String, String, String)>,
     props: HashMap<String, String>,
+    location: Option<String>,
+    format_version: Option<u8>,
 ) -> NifResult<Atom> {
     let schema = term::to_json(schema)?;
     Ok(spawn(env, r, timeout, async move {
         let schema: Schema = serde_json::from_value(schema)
             .map_err(|e| Error::invalid(format!("invalid schema: {e}")))?;
+        let format_version = match format_version {
+            None | Some(2) => FormatVersion::V2,
+            Some(1) => FormatVersion::V1,
+            Some(3) => FormatVersion::V3,
+            Some(v) => return Err(Error::invalid(format!("unknown format version {v}"))),
+        };
         let creation = TableCreation::builder()
             .name(name)
+            .partition_spec_opt(partition_spec(&schema, &partition)?)
             .schema(schema)
             .properties(props)
+            .location_opt(location)
+            .format_version(format_version)
             .build();
         let table = c.0.create_table(&ns(levels)?, creation).await?;
         Ok(TableResource::new(c.0.clone(), table))
     }))
+}
+
+fn partition_spec(
+    schema: &Schema,
+    fields: &[(String, String, String)],
+) -> Result<Option<UnboundPartitionSpec>, Error> {
+    if fields.is_empty() {
+        return Ok(None);
+    }
+    let mut spec = UnboundPartitionSpec::builder();
+    for (source, name, transform) in fields {
+        let field = schema
+            .field_by_name(source)
+            .ok_or_else(|| Error::invalid(format!("unknown partition source column {source}")))?;
+        spec = spec.add_partition_field(field.id, name, transform.parse::<Transform>()?)?;
+    }
+    Ok(Some(spec.build()))
 }
 
 #[rustler::nif]

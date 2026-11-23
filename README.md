@@ -5,7 +5,7 @@
 Rustler NIF.
 
 - Catalogs: Iceberg REST, Amazon S3 Tables, in-memory
-- Namespaces and tables: create (unpartitioned), list, load, rename, drop
+- Namespaces and tables: create (partitioned or not), list, load, rename, drop
 - Scans with column selection, row filters and time travel, as Arrow IPC or an
   `Explorer.DataFrame`
 - Appends: Parquet data files written separately from the commit, then
@@ -45,16 +45,15 @@ alias Explorer.DataFrame, as: DF
 
 :ok = Iceberg.Catalog.create_namespace(catalog, "web")
 
-schema = %{
-  "type" => "struct",
-  "fields" => [
-    %{"id" => 1, "name" => "id", "required" => true, "type" => "long"},
-    %{"id" => 2, "name" => "name", "required" => false, "type" => "string"},
-    %{"id" => 3, "name" => "ts", "required" => false, "type" => "timestamptz"}
-  ]
-}
+schema =
+  Iceberg.Schema.new([
+    {"id", :long, required: true},
+    {"name", :string},
+    {"ts", :timestamptz}
+  ])
 
-{:ok, table} = Iceberg.Catalog.create_table(catalog, "web", "events", schema)
+{:ok, table} =
+  Iceberg.Catalog.create_table(catalog, "web", "events", schema, partition_by: [{"ts", :day}])
 
 # Append: data is an Arrow IPC stream binary or an Explorer.DataFrame.
 {:ok, table} = Iceberg.Table.append(table, DF.new(%{"id" => [1, 2], "name" => ["a", "b"]}))

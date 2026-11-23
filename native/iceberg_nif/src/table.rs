@@ -6,7 +6,7 @@ use std::sync::Arc;
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use futures::TryStreamExt;
-use iceberg::arrow::schema_to_arrow_schema;
+use iceberg::arrow::{schema_to_arrow_schema, RecordBatchPartitionSplitter};
 use iceberg::spec::{DataFile, DataFileFormat, TableProperties};
 use iceberg::table::Table;
 use iceberg::transaction::{ApplyTransactionAction, Transaction};
@@ -16,6 +16,8 @@ use iceberg::writer::file_writer::location_generator::{
 };
 use iceberg::writer::file_writer::rolling_writer::RollingFileWriterBuilder;
 use iceberg::writer::file_writer::ParquetWriterBuilder;
+use iceberg::writer::partitioning::fanout_writer::FanoutWriter;
+use iceberg::writer::partitioning::PartitioningWriter;
 use iceberg::writer::{IcebergWriter, IcebergWriterBuilder};
 use iceberg::Catalog;
 use rustler::{Atom, Binary, Env, NifMap, NifResult, ResourceArc, Term};
@@ -161,12 +163,6 @@ async fn write(
     overrides: HashMap<String, String>,
 ) -> Result<Vec<DataFile>, Error> {
     let metadata = table.metadata();
-    if !metadata.default_partition_spec().is_unpartitioned() {
-        return Err(Error::new(
-            "feature_unsupported",
-            "writes to partitioned tables are not supported yet",
-        ));
-    }
     let schema = metadata.current_schema().clone();
     let arrow_schema: SchemaRef = Arc::new(schema_to_arrow_schema(&schema)?);
     let mut props = metadata.properties().clone();
@@ -181,13 +177,28 @@ async fn write(
         DefaultLocationGenerator::new(metadata)?,
         DefaultFileNameGenerator::new(prefix, None, DataFileFormat::Parquet),
     );
-    let mut writer = DataFileWriterBuilder::new(rolling).build(None).await?;
-    for batch in &batches {
-        writer
-            .write(batches::conform(batch, &arrow_schema)?)
-            .await?;
+    let builder = DataFileWriterBuilder::new(rolling);
+    let spec = metadata.default_partition_spec();
+
+    if spec.is_unpartitioned() {
+        let mut writer = builder.build(None).await?;
+        for batch in &batches {
+            writer
+                .write(batches::conform(batch, &arrow_schema)?)
+                .await?;
+        }
+        Ok(writer.close().await?)
+    } else {
+        let splitter =
+            RecordBatchPartitionSplitter::try_new_with_computed_values(schema, spec.clone())?;
+        let mut writer = FanoutWriter::new(builder);
+        for batch in &batches {
+            for (key, part) in splitter.split(&batches::conform(batch, &arrow_schema)?)? {
+                writer.write(key, part).await?;
+            }
+        }
+        Ok(writer.close().await?)
     }
-    Ok(writer.close().await?)
 }
 
 #[rustler::nif]
@@ -215,61 +226,4 @@ fn table_fast_append(
         let table = tx.commit(t.catalog.as_ref()).await?;
         Ok(TableResource::new(t.catalog.clone(), table))
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use iceberg::memory::MemoryCatalogBuilder;
-    use iceberg::spec::{
-        NestedField, PrimitiveType, Schema, Transform, Type, UnboundPartitionSpec,
-    };
-    use iceberg::{CatalogBuilder, NamespaceIdent, TableCreation};
-    use iceberg_storage_opendal::OpenDalResolvingStorageFactory;
-
-    use super::*;
-
-    #[test]
-    fn writes_to_partitioned_tables_are_refused() {
-        crate::RUNTIME.block_on(async {
-            let catalog = MemoryCatalogBuilder::default()
-                .with_storage_factory(Arc::new(OpenDalResolvingStorageFactory::new()))
-                .load(
-                    "test",
-                    HashMap::from([("warehouse".into(), "memory://warehouse".into())]),
-                )
-                .await
-                .unwrap();
-            let ns = NamespaceIdent::new("ns".into());
-            catalog.create_namespace(&ns, HashMap::new()).await.unwrap();
-            let schema = Schema::builder()
-                .with_fields(vec![NestedField::optional(
-                    1,
-                    "a",
-                    Type::Primitive(PrimitiveType::String),
-                )
-                .into()])
-                .build()
-                .unwrap();
-            let spec = UnboundPartitionSpec::builder()
-                .add_partition_field(1, "a", Transform::Identity)
-                .unwrap()
-                .build();
-            let creation = TableCreation::builder()
-                .name("t".into())
-                .schema(schema)
-                .partition_spec(spec)
-                .build();
-            let table = catalog.create_table(&ns, creation).await.unwrap();
-
-            assert_eq!(
-                write(&table, vec![], "p".into(), HashMap::new())
-                    .await
-                    .unwrap_err(),
-                Error::new(
-                    "feature_unsupported",
-                    "writes to partitioned tables are not supported yet"
-                )
-            );
-        });
-    }
 }

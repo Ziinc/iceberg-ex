@@ -54,7 +54,10 @@ defmodule Iceberg.Native do
   def namespace_exists(_ref, _timeout, _catalog, _ns), do: err()
   def drop_namespace(_ref, _timeout, _catalog, _ns), do: err()
   def list_tables(_ref, _timeout, _catalog, _ns), do: err()
-  def create_table(_ref, _timeout, _catalog, _ns, _name, _schema, _props), do: err()
+
+  def create_table(_ref, _timeout, _catalog, _ns, _name, _schema, _partition, _props, _loc, _fv),
+    do: err()
+
   def load_table(_ref, _timeout, _catalog, _ns, _name), do: err()
   def table_exists(_ref, _timeout, _catalog, _ns, _name), do: err()
   def drop_table(_ref, _timeout, _catalog, _ns, _name), do: err()

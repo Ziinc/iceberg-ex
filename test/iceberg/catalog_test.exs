@@ -58,6 +58,38 @@ defmodule Iceberg.CatalogTest do
     assert {:ok, false} = Catalog.table_exists(catalog, "analytics", "clicks")
   end
 
+  test "tables take a location, a format version and a partition spec by column name",
+       %{tmp_dir: dir} do
+    catalog = catalog(dir)
+
+    schema =
+      Iceberg.Schema.new([{"id", :long, required: true}, {"name", :string}, {"ts", :timestamptz}])
+
+    {:ok, table} =
+      Catalog.create_table(catalog, "analytics", "events", schema,
+        partition_by: [{"ts", :day}, {"id", {:bucket, 4}}, "name"],
+        location: "file://#{dir}/elsewhere",
+        format_version: 1
+      )
+
+    metadata = Table.metadata(table)
+    assert metadata["location"] == "file://#{dir}/elsewhere"
+    assert metadata["format-version"] == 1
+
+    assert [
+             %{"name" => "ts_day", "transform" => "day"},
+             %{"name" => "id_bucket", "transform" => "bucket[4]"},
+             %{"name" => "name", "transform" => "identity"}
+           ] = hd(metadata["partition-specs"])["fields"]
+
+    assert {:error, %Error{kind: :data_invalid}} =
+             Catalog.create_table(catalog, "analytics", "bad", schema, partition_by: ["missing"])
+
+    assert_raise ArgumentError, ~r/unknown partition transform/, fn ->
+      Catalog.create_table(catalog, "analytics", "bad", schema, partition_by: [{"ts", :week}])
+    end
+  end
+
   test "unknown catalog kinds and bad arguments are reported" do
     assert {:error, %Error{kind: :feature_unsupported}} = Catalog.new(:nope, %{})
     assert_raise ArgumentError, fn -> Catalog.new(:memory, %{"warehouse" => 1}) end
