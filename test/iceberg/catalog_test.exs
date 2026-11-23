@@ -85,8 +85,12 @@ defmodule Iceberg.CatalogTest do
     assert {:error, %Error{kind: :data_invalid}} =
              Catalog.create_table(catalog, "analytics", "bad", schema, partition_by: ["missing"])
 
-    assert_raise ArgumentError, ~r/unknown partition transform/, fn ->
-      Catalog.create_table(catalog, "analytics", "bad", schema, partition_by: [{"ts", :week}])
+    for transform <- [:week, {:bucket, 0}, {:truncate, 0}, {:bucket, -1}] do
+      assert_raise ArgumentError, ~r/unknown partition transform/, fn ->
+        Catalog.create_table(catalog, "analytics", "bad", schema,
+          partition_by: [{"id", transform}]
+        )
+      end
     end
   end
 

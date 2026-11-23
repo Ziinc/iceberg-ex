@@ -162,8 +162,8 @@ defmodule Iceberg.Catalog do
   defp field_name(column, {:truncate, _}), do: "#{column}_trunc"
   defp field_name(column, t) when t in [:year, :month, :day, :hour], do: "#{column}_#{t}"
 
-  defp transform({:bucket, n}) when is_integer(n), do: "bucket[#{n}]"
-  defp transform({:truncate, w}) when is_integer(w), do: "truncate[#{w}]"
+  defp transform({:bucket, n}) when is_integer(n) and n > 0, do: "bucket[#{n}]"
+  defp transform({:truncate, w}) when is_integer(w) and w > 0, do: "truncate[#{w}]"
 
   defp transform(t) when t in [:identity, :year, :month, :day, :hour, :void],
     do: Atom.to_string(t)
