@@ -13,13 +13,68 @@ use arrow_schema::{DataType, SchemaRef};
 
 use crate::error::Error;
 
+/// Rows a batch may claim beyond 8 per byte of input: columns that carry
+/// no buffers (all-null, run-end encoded) still cost memory once cast.
+const SPARSE_ROWS: u64 = 1 << 20;
+
+/// Decodes an Arrow IPC stream from untrusted bytes. arrow-ipc allocates
+/// what a message's header claims and panics on some malformed buffers, so
+/// lengths are checked against the input first and panics become errors.
 pub fn from_ipc(bytes: &[u8]) -> Result<Vec<RecordBatch>, Error> {
     let invalid =
-        |e: arrow_schema::ArrowError| Error::invalid(format!("invalid Arrow IPC stream: {e}"));
-    StreamReader::try_new(Cursor::new(bytes), None)
-        .map_err(invalid)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(invalid)
+        |m: &dyn std::fmt::Display| Error::invalid(format!("invalid Arrow IPC stream: {m}"));
+    check_framing(bytes).map_err(|m| invalid(&m))?;
+
+    let decode = || -> Result<Vec<RecordBatch>, arrow_schema::ArrowError> {
+        StreamReader::try_new(Cursor::new(bytes), None)?.collect()
+    };
+    let batches = match std::panic::catch_unwind(decode) {
+        Ok(result) => result.map_err(|e| invalid(&e))?,
+        Err(panic) => {
+            let message = (panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "malformed input".into());
+            return Err(invalid(&message));
+        }
+    };
+
+    let rows: u64 = batches.iter().map(|b| b.num_rows() as u64).sum();
+    if rows > (bytes.len() as u64 * 8).max(SPARSE_ROWS) {
+        return Err(invalid(&format!(
+            "{rows} rows cannot be in {} bytes",
+            bytes.len()
+        )));
+    }
+    Ok(batches)
+}
+
+/// Walks the stream's messages (`[0xFFFFFFFF] <metadata length> <metadata> <body>`)
+/// and checks every declared length against the bytes that follow it.
+fn check_framing(bytes: &[u8]) -> Result<(), String> {
+    let longer = || "a message is longer than the input".to_string();
+    let mut rest = bytes;
+    loop {
+        let Some(mut len) = take_i32(&mut rest) else {
+            return Ok(());
+        };
+        if len == -1 {
+            len = take_i32(&mut rest).ok_or_else(longer)?;
+        }
+        if len == 0 {
+            return Ok(());
+        }
+        let len = usize::try_from(len).map_err(|_| longer())?;
+        let (meta, tail) = rest.split_at_checked(len).ok_or_else(longer)?;
+        let message = arrow_ipc::root_as_message(meta).map_err(|e| format!("{e}"))?;
+        let body = usize::try_from(message.bodyLength()).map_err(|_| longer())?;
+        rest = tail.get(body..).ok_or_else(longer)?;
+    }
+}
+
+fn take_i32(rest: &mut &[u8]) -> Option<i32> {
+    let (head, tail) = rest.split_first_chunk::<4>()?;
+    *rest = tail;
+    Some(i32::from_le_bytes(*head))
 }
 
 pub fn to_ipc(schema: &SchemaRef, batches: &[RecordBatch]) -> Result<Vec<u8>, Error> {
@@ -107,7 +162,9 @@ fn exact(floats: &ArrayRef, cast: &ArrayRef, column: &str) -> Result<(), Error> 
 mod tests {
     use std::sync::Arc;
 
-    use arrow_array::{Array, Float64Array, Int32Array, Int64Array, LargeStringArray, StringArray};
+    use arrow_array::{
+        Array, Float64Array, Int32Array, Int64Array, LargeStringArray, NullArray, StringArray,
+    };
     use arrow_schema::{DataType, Field, Schema};
 
     use super::*;
@@ -218,6 +275,78 @@ mod tests {
             Err(Error::invalid(
                 "column id: 1.5 cannot be stored without losing precision"
             ))
+        );
+    }
+
+    /// `ipc` with an 8-byte field of the first record batch's metadata,
+    /// found by its value (`None`: the body length), set to `to`.
+    fn patch_batch_field(mut ipc: Vec<u8>, from: Option<i64>, to: i64) -> Vec<u8> {
+        let mut pos = 0;
+        loop {
+            let len = i32::from_le_bytes(ipc[pos + 4..pos + 8].try_into().unwrap()) as usize;
+            let meta = pos + 8..pos + 8 + len;
+            let body = arrow_ipc::root_as_message(&ipc[meta.clone()])
+                .unwrap()
+                .bodyLength();
+            if body > 0 {
+                let from = from.unwrap_or(body).to_le_bytes();
+                let at = ipc[meta.clone()]
+                    .windows(8)
+                    .position(|w| w == from)
+                    .expect("field");
+                ipc[meta.start + at..meta.start + at + 8].copy_from_slice(&to.to_le_bytes());
+                return ipc;
+            }
+            pos = meta.end + body as usize;
+        }
+    }
+
+    fn three_ints() -> Vec<u8> {
+        let input = batch(vec![("id", Arc::new(Int32Array::from(vec![1, 2, 3])))]);
+        to_ipc(&input.schema(), std::slice::from_ref(&input)).unwrap()
+    }
+
+    #[test]
+    fn refuses_message_lengths_beyond_the_input_before_allocating() {
+        let longer = Err(Error::invalid(
+            "invalid Arrow IPC stream: a message is longer than the input",
+        ));
+
+        // The batch's body claims 32 PiB.
+        let bytes = patch_batch_field(three_ints(), None, 1 << 55);
+        assert_eq!(from_ipc(&bytes), longer);
+
+        let mut bytes = three_ints();
+        bytes[4..8].copy_from_slice(&i32::MAX.to_le_bytes());
+        assert_eq!(from_ipc(&bytes), longer);
+    }
+
+    #[test]
+    fn refuses_batches_claiming_more_rows_than_their_bytes() {
+        let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Null, true)]));
+        let rows =
+            |n| RecordBatch::try_new(schema.clone(), vec![Arc::new(NullArray::new(n))]).unwrap();
+
+        let bytes = to_ipc(&schema, &[rows(1 << 40)]).unwrap();
+        assert_eq!(
+            from_ipc(&bytes),
+            Err(Error::invalid(format!(
+                "invalid Arrow IPC stream: {} rows cannot be in {} bytes",
+                1u64 << 40,
+                bytes.len()
+            )))
+        );
+        assert!(from_ipc(&to_ipc(&schema, &[rows(1000)]).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn arrow_decoding_panics_are_invalid_input() {
+        // The values buffer (12 bytes) claims to run far past the body.
+        let bytes = patch_batch_field(three_ints(), Some(12), 1 << 40);
+        let error = format!("{:?}", from_ipc(&bytes).unwrap_err());
+        assert!(
+            error.contains("data_invalid") && error.contains("invalid Arrow IPC stream"),
+            "{error}"
         );
     }
 
