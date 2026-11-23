@@ -27,8 +27,15 @@ defmodule Iceberg.Native do
 
     timeout =
       case Keyword.get(opts, :timeout, :infinity) do
-        :infinity -> nil
-        ms when is_integer(ms) and ms > 0 -> ms
+        :infinity ->
+          nil
+
+        ms when is_integer(ms) and ms > 0 ->
+          ms
+
+        other ->
+          raise ArgumentError,
+                ":timeout must be a positive integer or :infinity, got: #{inspect(other)}"
       end
 
     :ok = fun.(ref, timeout)

@@ -5,8 +5,24 @@ use rustler::types::map::MapIterator;
 use rustler::{Binary, Encoder, Env, NewBinary, NifResult, OwnedEnv, Term, TermType};
 use serde_json::{Map, Number, Value};
 
+use crate::error::arg_error;
+
+/// How deeply `to_json/1` and filters may nest: recursion runs on a
+/// scheduler thread, whose stack a much deeper term would overflow.
+pub const MAX_DEPTH: usize = 128;
+
 /// Elixir data (maps, lists, strings, numbers, booleans, `nil`, atoms) as JSON.
 pub fn to_json(term: Term) -> NifResult<Value> {
+    json(term, 0)
+}
+
+fn json(term: Term, depth: usize) -> NifResult<Value> {
+    if depth > MAX_DEPTH {
+        return Err(arg_error(format!(
+            "data nested more than {MAX_DEPTH} levels"
+        )));
+    }
+    let to_json = |t| json(t, depth + 1);
     Ok(match term.get_type() {
         TermType::Atom => match term.atom_to_string()?.as_str() {
             "nil" => Value::Null,

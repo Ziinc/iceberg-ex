@@ -5,14 +5,22 @@ use iceberg::spec::Datum;
 use rustler::types::tuple::get_tuple;
 use rustler::{Error::BadArg, NifResult, Term, TermType};
 
+use crate::error::arg_error;
+use crate::term::MAX_DEPTH;
+
 pub fn decode(term: Term) -> NifResult<Option<Predicate>> {
     if term.get_type() == TermType::Atom && term.atom_to_string()? == "nil" {
         return Ok(None);
     }
-    predicate(term).map(Some)
+    predicate(term, 0).map(Some)
 }
 
-fn predicate(term: Term) -> NifResult<Predicate> {
+fn predicate(term: Term, depth: usize) -> NifResult<Predicate> {
+    if depth > MAX_DEPTH {
+        return Err(arg_error(format!(
+            "filter nested more than {MAX_DEPTH} levels"
+        )));
+    }
     if let Ok(b) = term.decode::<bool>() {
         return Ok(if b {
             Predicate::AlwaysTrue
@@ -32,9 +40,9 @@ fn predicate(term: Term) -> NifResult<Predicate> {
     };
 
     Ok(match (op.as_str(), items.len()) {
-        ("and", 3) => predicate(items[1])?.and(predicate(items[2])?),
-        ("or", 3) => predicate(items[1])?.or(predicate(items[2])?),
-        ("not", 2) => !predicate(items[1])?,
+        ("and", 3) => predicate(items[1], depth + 1)?.and(predicate(items[2], depth + 1)?),
+        ("or", 3) => predicate(items[1], depth + 1)?.or(predicate(items[2], depth + 1)?),
+        ("not", 2) => !predicate(items[1], depth + 1)?,
         ("==", 3) => col()?.equal_to(datum(items[2])?),
         ("!=", 3) => col()?.not_equal_to(datum(items[2])?),
         ("<", 3) => col()?.less_than(datum(items[2])?),

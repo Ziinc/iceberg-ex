@@ -80,6 +80,27 @@ impl Encoder for Error {
     }
 }
 
+/// Raises `%ArgumentError{message: message}` in the calling process, for
+/// arguments the NIF refuses before doing any work.
+pub fn arg_error(message: impl Into<String>) -> rustler::Error {
+    rustler::Error::RaiseTerm(Box::new(ArgumentError(message.into())))
+}
+
+struct ArgumentError(String);
+
+impl Encoder for ArgumentError {
+    fn encode<'a>(&self, env: Env<'a>) -> Term<'a> {
+        let atom = |s: &str| Atom::from_str(env, s).expect("atom").encode(env);
+        let keys = [atom("__struct__"), atom("__exception__"), atom("message")];
+        let values = [
+            atom("Elixir.ArgumentError"),
+            true.encode(env),
+            self.0.encode(env),
+        ];
+        Term::map_from_arrays(env, &keys, &values).expect("unique keys")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

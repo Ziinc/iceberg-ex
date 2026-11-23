@@ -51,13 +51,14 @@ defmodule Iceberg.Table do
   @spec scan(t(), keyword()) :: result(binary())
   def scan(%__MODULE__{} = table, opts \\ []) do
     filter = Filter.normalize(opts[:filter])
+    select = select(opts[:select])
 
     Native.call(opts, fn ref, timeout ->
       Native.table_scan(
         ref,
         timeout,
         table.resource,
-        opts[:select],
+        select,
         filter,
         opts[:snapshot_id],
         opts[:batch_size],
@@ -85,12 +86,11 @@ defmodule Iceberg.Table do
   @spec write_data_files(t(), data(), keyword()) :: result(DataFiles.t())
   def write_data_files(%__MODULE__{} = table, data, opts \\ []) do
     props = Keyword.get(opts, :properties, %{})
+    prefix = file_prefix(opts[:file_prefix])
+    ipc = ipc(data)
 
     with {:ok, {resource, files}} <-
-           Native.call(
-             opts,
-             &Native.table_write(&1, &2, table.resource, ipc(data), opts[:file_prefix], props)
-           ) do
+           Native.call(opts, &Native.table_write(&1, &2, table.resource, ipc, prefix, props)) do
       {:ok, %DataFiles{resource: resource, files: files}}
     end
   end
@@ -98,26 +98,38 @@ defmodule Iceberg.Table do
   @doc """
   Commits data files to the table as a new append snapshot. If the table has
   moved on since `table` was loaded, the commit is retried on the latest
-  metadata, as iceberg-rust's `commit.retry.*` table properties allow.
+  metadata, as iceberg-rust's `commit.retry.*` table properties allow; when
+  many writers commit to one table at once, the retries can run out, and the
+  error is `:catalog_commit_conflicts` with `retryable: true`. With no rows
+  and no snapshot properties to add, the table is returned as it is.
 
   Options:
 
     * `:snapshot_properties` - extra entries for the snapshot's summary
+      (not `"operation"`, which the commit sets)
     * `:check_duplicate` - refuse files already in the table (default `true`)
     * `:timeout`
   """
   @spec fast_append(t(), DataFiles.t() | [DataFiles.t()], keyword()) :: result(t())
   def fast_append(%__MODULE__{} = table, data_files, opts \\ []) do
-    resources = data_files |> List.wrap() |> Enum.map(& &1.resource)
+    data_files = List.wrap(data_files)
+    resources = Enum.map(data_files, & &1.resource)
     props = Keyword.get(opts, :snapshot_properties, %{})
     check = Keyword.get(opts, :check_duplicate, true)
 
-    with {:ok, resource} <-
-           Native.call(
-             opts,
-             &Native.table_fast_append(&1, &2, table.resource, resources, props, check)
-           ) do
-      {:ok, %{table | resource: resource}}
+    if Map.has_key?(props, "operation"),
+      do: raise(ArgumentError, ~s(snapshot property "operation" is set by the commit))
+
+    if props == %{} and Enum.all?(data_files, &(&1.files == [])) do
+      {:ok, table}
+    else
+      with {:ok, resource} <-
+             Native.call(
+               opts,
+               &Native.table_fast_append(&1, &2, table.resource, resources, props, check)
+             ) do
+        {:ok, %{table | resource: resource}}
+      end
     end
   end
 
@@ -143,4 +155,46 @@ defmodule Iceberg.Table do
   end
 
   defp ipc(data) when is_binary(data), do: data
+
+  @accepted if Code.ensure_loaded?(Explorer.DataFrame),
+              do: "an Arrow IPC stream binary or an Explorer.DataFrame",
+              else: "an Arrow IPC stream binary"
+
+  defp ipc(other),
+    do: raise(ArgumentError, "expected #{@accepted}, got: #{inspect(other, limit: 3)}")
+
+  defp select(nil), do: nil
+
+  defp select(columns) when is_list(columns) do
+    if Enum.all?(columns, &is_binary/1) and Enum.uniq(columns) == columns,
+      do: columns,
+      else: bad_select(columns)
+  end
+
+  defp select(other), do: bad_select(other)
+
+  defp bad_select(value),
+    do:
+      raise(
+        ArgumentError,
+        ":select must be a list of distinct column names, got: #{inspect(value, limit: 5)}"
+      )
+
+  # A prefix is part of a file name; a separator would place files elsewhere.
+  defp file_prefix(nil), do: nil
+
+  defp file_prefix(prefix) when is_binary(prefix) and prefix != "" do
+    if String.contains?(prefix, ["/", "\\"]),
+      do: bad_prefix(prefix),
+      else: prefix
+  end
+
+  defp file_prefix(other), do: bad_prefix(other)
+
+  defp bad_prefix(value),
+    do:
+      raise(
+        ArgumentError,
+        ":file_prefix must be a non-empty file name without / or \\, got: #{inspect(value)}"
+      )
 end
