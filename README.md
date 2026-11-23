@@ -26,8 +26,8 @@ def deps do
 end
 ```
 
-Precompiled NIFs cover macOS and Linux (glibc and musl) on x86_64 and aarch64.
-Elsewhere, add `{:rustler, "~> 0.38"}` and build from source with
+Precompiled NIFs cover macOS and Linux (glibc and musl) on x86_64 and aarch64,
+and Windows on x86_64. Elsewhere, add `{:rustler, "~> 0.38"}` and build from source with
 `RUSTLER_PRECOMPILED_FORCE_BUILD_ALL=1`.
 
 ## Usage
