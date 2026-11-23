@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: OTP ${{ matrix.otp }} / Elixir ${{ matrix.elixir }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { otp: "26", elixir: "1.15" }
+          - { otp: "28", elixir: "1.20" }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+          elixir-version: ${{ matrix.elixir }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+            ~/.cargo/registry
+            native/iceberg_nif/target
+          key: ${{ runner.os }}-${{ matrix.otp }}-${{ hashFiles('mix.lock', 'native/iceberg_nif/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.otp }}-
+      - run: mix deps.get
+      - run: mix format --check-formatted
+        if: matrix.elixir == '1.20'
+      - name: Rust checks
+        working-directory: native/iceberg_nif
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+      - run: mix test --warnings-as-errors

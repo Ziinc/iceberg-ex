@@ -1,0 +1,3 @@
+# NIFs are loaded with dlopen, so musl builds must link the C runtime dynamically.
+[target.'cfg(target_env = "musl")']
+rustflags = ["-C", "target-feature=-crt-static"]
