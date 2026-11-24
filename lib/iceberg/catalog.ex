@@ -78,21 +78,39 @@ defmodule Iceberg.Catalog do
   end
 
   @doc """
-  Creates an unpartitioned table. `schema` is in the spec's JSON shape:
+  Creates a table. `schema` is in the spec's JSON shape, as built by
+  `Iceberg.Schema.new/1`.
 
-      %{"type" => "struct", "fields" => [
-        %{"id" => 1, "name" => "id", "required" => true, "type" => "long"},
-        %{"id" => 2, "name" => "name", "required" => false, "type" => "string"}
-      ]}
+  Options:
 
-  Options: `:properties` (table properties) and `:timeout`.
+    * `:partition_by` - partition fields, each a source column name
+      (identity) or `{column, transform}` / `{column, transform, name}`, where
+      transform is `:identity`, `:year`, `:month`, `:day`, `:hour`, `:void`,
+      `{:bucket, n}` or `{:truncate, width}`
+    * `:properties` - table properties
+    * `:location` - the table's location (default: chosen by the catalog)
+    * `:format_version` - 1, 2 (default) or 3
+    * `:timeout`
   """
   @spec create_table(t(), namespace(), String.t(), map(), keyword()) :: result(Table.t())
   def create_table(%__MODULE__{} = c, namespace, name, schema, opts \\ []) do
+    partition = opts |> Keyword.get(:partition_by, []) |> Enum.map(&partition_field/1)
     props = Keyword.get(opts, :properties, %{})
 
-    opts
-    |> Native.call(&Native.create_table(&1, &2, c.resource, ns(namespace), name, schema, props))
+    Native.call(opts, fn ref, timeout ->
+      Native.create_table(
+        ref,
+        timeout,
+        c.resource,
+        ns(namespace),
+        name,
+        schema,
+        partition,
+        props,
+        opts[:location],
+        opts[:format_version]
+      )
+    end)
     |> table(namespace, name)
   end
 
@@ -127,4 +145,28 @@ defmodule Iceberg.Catalog do
 
   defp ns(namespace) when is_binary(namespace), do: [namespace]
   defp ns(namespace) when is_list(namespace), do: namespace
+
+  # {source column, partition field name, transform}, as Iceberg's Java API names them.
+  defp partition_field({column, transform, name}), do: {column, name, transform(transform)}
+
+  defp partition_field({column, transform}) do
+    spec = transform(transform)
+    {column, field_name(column, transform), spec}
+  end
+
+  defp partition_field(column) when is_binary(column), do: partition_field({column, :identity})
+
+  defp field_name(column, :identity), do: column
+  defp field_name(column, :void), do: "#{column}_null"
+  defp field_name(column, {:bucket, _}), do: "#{column}_bucket"
+  defp field_name(column, {:truncate, _}), do: "#{column}_trunc"
+  defp field_name(column, t) when t in [:year, :month, :day, :hour], do: "#{column}_#{t}"
+
+  defp transform({:bucket, n}) when is_integer(n) and n > 0, do: "bucket[#{n}]"
+  defp transform({:truncate, w}) when is_integer(w) and w > 0, do: "truncate[#{w}]"
+
+  defp transform(t) when t in [:identity, :year, :month, :day, :hour, :void],
+    do: Atom.to_string(t)
+
+  defp transform(t), do: raise(ArgumentError, "unknown partition transform #{inspect(t)}")
 end
