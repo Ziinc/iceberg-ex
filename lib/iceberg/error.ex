@@ -7,4 +7,6 @@ defmodule Iceberg.Error do
   `:unexpected`, ...), or `:timeout`. `retryable` is iceberg-rust's own verdict.
   """
   defexception [:kind, :message, retryable: false]
+
+  @type t :: %__MODULE__{kind: atom(), message: String.t(), retryable: boolean()}
 end

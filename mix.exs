@@ -13,7 +13,12 @@ defmodule Iceberg.MixProject do
       deps: deps(),
       description: "Apache Iceberg tables for Elixir, backed by iceberg-rust",
       package: package(),
-      docs: [main: "Iceberg", source_ref: "v#{@version}", source_url: @source_url]
+      docs: [
+        main: "readme",
+        extras: ["README.md"],
+        source_ref: "v#{@version}",
+        source_url: @source_url
+      ]
     ]
   end
 
