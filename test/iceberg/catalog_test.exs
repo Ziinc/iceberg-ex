@@ -29,6 +29,35 @@ defmodule Iceberg.CatalogTest do
              Catalog.create_namespace(catalog, "analytics")
   end
 
+  test "namespaces can be created, listed, read and dropped", %{tmp_dir: dir} do
+    catalog = catalog(dir)
+
+    assert :ok = Catalog.create_namespace(catalog, ["analytics", "web"], %{"owner" => "ty"})
+    assert {:ok, [["analytics"]]} = Catalog.list_namespaces(catalog)
+    assert {:ok, [["analytics", "web"]]} = Catalog.list_namespaces(catalog, "analytics")
+    assert {:ok, %{"owner" => "ty"}} = Catalog.get_namespace(catalog, ["analytics", "web"])
+    assert {:ok, true} = Catalog.namespace_exists(catalog, ["analytics", "web"])
+
+    assert :ok = Catalog.drop_namespace(catalog, ["analytics", "web"])
+    assert {:ok, false} = Catalog.namespace_exists(catalog, ["analytics", "web"])
+
+    assert {:error, %Error{kind: :namespace_not_found}} = Catalog.get_namespace(catalog, "nope")
+  end
+
+  test "tables can be listed, renamed and dropped", %{tmp_dir: dir} do
+    catalog = catalog(dir)
+    {:ok, _} = Catalog.create_table(catalog, "analytics", "events", events_schema())
+
+    assert {:ok, ["events"]} = Catalog.list_tables(catalog, "analytics")
+    assert {:ok, true} = Catalog.table_exists(catalog, "analytics", "events")
+
+    assert :ok = Catalog.rename_table(catalog, {"analytics", "events"}, {"analytics", "clicks"})
+    assert {:ok, ["clicks"]} = Catalog.list_tables(catalog, "analytics")
+
+    assert :ok = Catalog.drop_table(catalog, "analytics", "clicks")
+    assert {:ok, false} = Catalog.table_exists(catalog, "analytics", "clicks")
+  end
+
   test "unknown catalog kinds and bad arguments are reported" do
     assert {:error, %Error{kind: :feature_unsupported}} = Catalog.new(:nope, %{})
     assert_raise ArgumentError, fn -> Catalog.new(:memory, %{"warehouse" => 1}) end

@@ -43,9 +43,38 @@ defmodule Iceberg.Catalog do
     end
   end
 
+  @doc "The namespaces under `parent` (top-level ones by default), as lists of levels."
+  @spec list_namespaces(t(), namespace() | nil, keyword()) :: result([[String.t()]])
+  def list_namespaces(%__MODULE__{} = c, parent \\ nil, opts \\ []) do
+    parent = if parent, do: ns(parent)
+    Native.call(opts, &Native.list_namespaces(&1, &2, c.resource, parent))
+  end
+
   @spec create_namespace(t(), namespace(), map(), keyword()) :: :ok | {:error, Iceberg.Error.t()}
   def create_namespace(%__MODULE__{} = c, namespace, props \\ %{}, opts \\ []) do
     Native.call(opts, &Native.create_namespace(&1, &2, c.resource, ns(namespace), props))
+  end
+
+  @doc "The namespace's properties."
+  @spec get_namespace(t(), namespace(), keyword()) :: result(%{String.t() => String.t()})
+  def get_namespace(%__MODULE__{} = c, namespace, opts \\ []) do
+    Native.call(opts, &Native.get_namespace(&1, &2, c.resource, ns(namespace)))
+  end
+
+  @spec namespace_exists(t(), namespace(), keyword()) :: result(boolean())
+  def namespace_exists(%__MODULE__{} = c, namespace, opts \\ []) do
+    Native.call(opts, &Native.namespace_exists(&1, &2, c.resource, ns(namespace)))
+  end
+
+  @spec drop_namespace(t(), namespace(), keyword()) :: :ok | {:error, Iceberg.Error.t()}
+  def drop_namespace(%__MODULE__{} = c, namespace, opts \\ []) do
+    Native.call(opts, &Native.drop_namespace(&1, &2, c.resource, ns(namespace)))
+  end
+
+  @doc "The names of the tables in a namespace."
+  @spec list_tables(t(), namespace(), keyword()) :: result([String.t()])
+  def list_tables(%__MODULE__{} = c, namespace, opts \\ []) do
+    Native.call(opts, &Native.list_tables(&1, &2, c.resource, ns(namespace)))
   end
 
   @doc """
@@ -72,6 +101,23 @@ defmodule Iceberg.Catalog do
     opts
     |> Native.call(&Native.load_table(&1, &2, c.resource, ns(namespace), name))
     |> table(namespace, name)
+  end
+
+  @spec table_exists(t(), namespace(), String.t(), keyword()) :: result(boolean())
+  def table_exists(%__MODULE__{} = c, namespace, name, opts \\ []) do
+    Native.call(opts, &Native.table_exists(&1, &2, c.resource, ns(namespace), name))
+  end
+
+  @doc "Drops a table from the catalog, leaving its files."
+  @spec drop_table(t(), namespace(), String.t(), keyword()) :: :ok | {:error, Iceberg.Error.t()}
+  def drop_table(%__MODULE__{} = c, namespace, name, opts \\ []) do
+    Native.call(opts, &Native.drop_table(&1, &2, c.resource, ns(namespace), name))
+  end
+
+  @spec rename_table(t(), {namespace(), String.t()}, {namespace(), String.t()}, keyword()) ::
+          :ok | {:error, Iceberg.Error.t()}
+  def rename_table(%__MODULE__{} = c, {from_ns, from}, {to_ns, to}, opts \\ []) do
+    Native.call(opts, &Native.rename_table(&1, &2, c.resource, ns(from_ns), from, ns(to_ns), to))
   end
 
   defp table({:ok, resource}, namespace, name),
