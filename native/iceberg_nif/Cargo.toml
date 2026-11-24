@@ -1,0 +1,30 @@
+[package]
+name = "iceberg_nif"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "iceberg_nif"
+crate-type = ["cdylib"]
+
+[dependencies]
+rustler = "0.38"
+iceberg = "0.11"
+iceberg-catalog-rest = "0.11"
+iceberg-catalog-s3tables = "0.11"
+iceberg-storage-opendal = { version = "0.11", default-features = false, features = ["opendal-fs", "opendal-memory", "opendal-s3"] }
+arrow-array = "58.4"
+arrow-cast = "58.4"
+arrow-ipc = "58.4"
+arrow-schema = "58.4"
+parquet = { version = "58.4", default-features = false }
+futures = "0.3"
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = "debuginfo"

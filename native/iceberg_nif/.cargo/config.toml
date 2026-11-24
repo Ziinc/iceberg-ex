@@ -1,0 +1,8 @@
+# NIFs are loaded with dlopen, so musl builds must link the C runtime dynamically.
+[target.'cfg(target_env = "musl")']
+rustflags = ["-C", "target-feature=-crt-static"]
+
+[env]
+# aws-lc-sys (rustls, via the AWS SDK and reqwest) needs NASM for x86_64
+# Windows; without it on PATH, use the prebuilt objects it ships.
+AWS_LC_SYS_PREBUILT_NASM = "1"

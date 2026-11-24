@@ -1,0 +1,56 @@
+# Builds the precompiled NIFs that RustlerPrecompiled downloads and attaches
+# them to the release of a pushed v* tag (see README.md, "Releasing"). Pull
+# requests that touch the crate build them too, without releasing.
+name: Release NIFs
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths: ["native/**", ".github/workflows/release.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: NIF ${{ matrix.nif }} - ${{ matrix.job.target }}
+    runs-on: ${{ matrix.job.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        nif: ["2.15"]
+        job:
+          - { target: aarch64-apple-darwin, os: macos-15 }
+          - { target: x86_64-apple-darwin, os: macos-15-intel }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04, use-cross: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-22.04, use-cross: true }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-22.04, use-cross: true }
+          - { target: x86_64-pc-windows-gnu, os: windows-2022 }
+          - { target: x86_64-pc-windows-msvc, os: windows-2022 }
+    steps:
+      - uses: actions/checkout@v5
+      - name: Read the project version
+        shell: bash
+        run: echo "PROJECT_VERSION=$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs | head -n1)" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.job.target }}
+      - id: build
+        uses: philss/rustler-precompiled-action@v1.1.4
+        with:
+          project-name: iceberg_nif
+          project-version: ${{ env.PROJECT_VERSION }}
+          target: ${{ matrix.job.target }}
+          nif-version: ${{ matrix.nif }}
+          use-cross: ${{ matrix.job.use-cross }}
+          project-dir: native/iceberg_nif
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.build.outputs.file-name }}
+          path: ${{ steps.build.outputs.file-path }}
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: ${{ steps.build.outputs.file-path }}
