@@ -1,7 +1,11 @@
-# Builds the precompiled NIFs that RustlerPrecompiled downloads and attaches
-# them to the release of a pushed v* tag (see README.md, "Releasing"). Pull
-# requests that touch the crate build them too, without releasing.
-name: Release NIFs
+# Releases a pushed v* tag (modelled on Ziinc/feoxdb-ex): builds the
+# precompiled NIFs and attaches them to the GitHub release, then generates the
+# checksum file from those assets, attaches it and commits it to main, then
+# publishes the package and docs to Hex. See README.md, "Releasing".
+#
+# Pull requests that touch the crate run the build only. To retry a release,
+# run the workflow by hand with the existing tag.
+name: Release
 
 on:
   push:
@@ -9,13 +13,22 @@ on:
   pull_request:
     paths: ["native/**", ".github/workflows/release.yml"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re)build and publish, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  # Empty on pull requests, which only build.
+  RELEASE_TAG: ${{ github.event.inputs.tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
 
 jobs:
   build:
     name: NIF ${{ matrix.nif }} - ${{ matrix.job.target }}
     runs-on: ${{ matrix.job.os }}
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -31,26 +44,126 @@ jobs:
           - { target: x86_64-pc-windows-msvc, os: windows-2022 }
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      # The NIF file names carry the version, so a tag must match mix.exs.
       - name: Read the project version
+        id: version
         shell: bash
-        run: echo "PROJECT_VERSION=$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs | head -n1)" >> "$GITHUB_ENV"
+        run: |
+          version=$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs | head -n1)
+          if [ -n "$RELEASE_TAG" ] && [ "v$version" != "$RELEASE_TAG" ]; then
+            echo "mix.exs is $version, the tag is $RELEASE_TAG"; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.job.target }}
+
       - id: build
-        uses: philss/rustler-precompiled-action@v1.1.4
+        uses: philss/rustler-precompiled-action@v1.1.5
         with:
           project-name: iceberg_nif
-          project-version: ${{ env.PROJECT_VERSION }}
+          project-version: ${{ steps.version.outputs.version }}
           target: ${{ matrix.job.target }}
           nif-version: ${{ matrix.nif }}
-          use-cross: ${{ matrix.job.use-cross }}
+          # The action's inputs are strings, and "false" is truthy to it.
+          use-cross: ${{ matrix.job.use-cross && 'true' || '' }}
           project-dir: native/iceberg_nif
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.build.outputs.file-name }}
           path: ${{ steps.build.outputs.file-path }}
-      - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+          if-no-files-found: error
+
+      - name: Attach to the release
+        if: env.RELEASE_TAG != ''
+        uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: ${{ steps.build.outputs.file-path }}
+
+  # Hashes the NIFs as released: the Hex package ships this file and
+  # RustlerPrecompiled checks every download against it.
+  checksum:
+    name: Checksum file
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          elixir-version: "1.20"
+
+      # config/config.exs builds the NIF from source in :dev, and the
+      # download task compiles the project first.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/iceberg_nif
+          shared-key: release
+
+      - run: mix deps.get
+      - run: mix rustler_precompiled.download Iceberg.Native --all --print
+
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: checksum-Elixir.Iceberg.Native.exs
+
+      # Git dependencies on main download the released NIFs with it.
+      - name: Commit to main
+        run: |
+          cp checksum-Elixir.Iceberg.Native.exs "$RUNNER_TEMP/"
+          git fetch --depth=1 origin main
+          git checkout -B main FETCH_HEAD
+          cp "$RUNNER_TEMP/checksum-Elixir.Iceberg.Native.exs" .
+          git add checksum-Elixir.Iceberg.Native.exs
+          git diff --staged --quiet && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update NIF checksums for $RELEASE_TAG"
+          git push origin main
+
+  publish:
+    name: Publish to Hex
+    needs: checksum
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Download the checksum file from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$RELEASE_TAG" --pattern checksum-Elixir.Iceberg.Native.exs
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          elixir-version: "1.20"
+
+      # Building the docs compiles the project, which builds the NIF in :dev.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/iceberg_nif
+          shared-key: release
+
+      - run: mix deps.get
+
+      - name: Publish the package and docs
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: mix hex.publish --yes

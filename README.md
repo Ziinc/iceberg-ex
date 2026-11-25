@@ -80,8 +80,12 @@ The NIF is built from `native/iceberg_nif` in `:dev` and `:test`.
 
 ## Releasing
 
-1. Bump the version in `mix.exs`, tag `vX.Y.Z` and push the tag. The `Release NIFs`
-   workflow attaches the NIFs to the GitHub release.
-2. `mix rustler_precompiled.download Iceberg.Native --all --print` writes
-   `checksum-Elixir.Iceberg.Native.exs`.
-3. `mix hex.publish`.
+1. Merge a version bump of `@version` in `mix.exs`.
+2. Tag the merge `vX.Y.Z` and push the tag. The `Release` workflow then:
+   - builds the NIFs and attaches them to the GitHub release;
+   - generates `checksum-Elixir.Iceberg.Native.exs` from those files,
+     attaches it to the release and commits it to `main`;
+   - publishes the package, with the checksum file, and docs to Hex
+     (needs the `HEX_API_KEY` repository secret).
+
+To retry a failed release, run the workflow by hand with the existing tag.
