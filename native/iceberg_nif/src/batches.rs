@@ -176,7 +176,9 @@ fn column(name: &str, values: &[Term]) -> Result<ArrayRef, Error> {
         };
     }
 
-    let nil = |v: &Term| v.get_type() == TermType::Atom && v.atom_to_string().ok().as_deref() == Some("nil");
+    let nil = |v: &Term| {
+        v.get_type() == TermType::Atom && v.atom_to_string().ok().as_deref() == Some("nil")
+    };
     let out_of_range = || Error::invalid(format!("column {name}: an integer is outside 64 bits"));
 
     Ok(match column {
@@ -184,13 +186,25 @@ fn column(name: &str, values: &[Term]) -> Result<ArrayRef, Error> {
         Kind::Bool => Arc::new(
             values
                 .iter()
-                .map(|v| if nil(v) { None } else { v.decode::<bool>().ok() })
+                .map(|v| {
+                    if nil(v) {
+                        None
+                    } else {
+                        v.decode::<bool>().ok()
+                    }
+                })
                 .collect::<BooleanArray>(),
         ),
         Kind::Int => Arc::new(
             values
                 .iter()
-                .map(|v| if nil(v) { Ok(None) } else { v.decode::<i64>().map(Some).map_err(|_| out_of_range()) })
+                .map(|v| {
+                    if nil(v) {
+                        Ok(None)
+                    } else {
+                        v.decode::<i64>().map(Some).map_err(|_| out_of_range())
+                    }
+                })
                 .collect::<Result<Int64Array, _>>()?,
         ),
         Kind::Float => Arc::new(
@@ -198,23 +212,30 @@ fn column(name: &str, values: &[Term]) -> Result<ArrayRef, Error> {
                 .iter()
                 .map(|v| match v.get_type() {
                     TermType::Float => v.decode::<f64>().map(Some).map_err(|_| out_of_range()),
-                    TermType::Integer => v.decode::<i64>().map(|i| Some(i as f64)).map_err(|_| out_of_range()),
+                    TermType::Integer => v
+                        .decode::<i64>()
+                        .map(|i| Some(i as f64))
+                        .map_err(|_| out_of_range()),
                     _ => Ok(None),
                 })
                 .collect::<Result<Float64Array, _>>()?,
         ),
         Kind::Str => {
-            let bytes = values.iter().map(|v| v.decode::<Binary>().map(|b| b.len()).unwrap_or(0)).sum();
+            let bytes = values
+                .iter()
+                .map(|v| v.decode::<Binary>().map(|b| b.len()).unwrap_or(0))
+                .sum();
             let mut builder = StringBuilder::with_capacity(values.len(), bytes);
             for v in values {
                 if nil(v) {
                     builder.append_null();
                 } else {
-                    let binary = v
-                        .decode::<Binary>()
-                        .map_err(|_| Error::invalid(format!("column {name}: a value is not a binary")))?;
-                    let text = std::str::from_utf8(binary.as_slice())
-                        .map_err(|_| Error::invalid(format!("column {name}: a value is not UTF-8")))?;
+                    let binary = v.decode::<Binary>().map_err(|_| {
+                        Error::invalid(format!("column {name}: a value is not a binary"))
+                    })?;
+                    let text = std::str::from_utf8(binary.as_slice()).map_err(|_| {
+                        Error::invalid(format!("column {name}: a value is not UTF-8"))
+                    })?;
                     builder.append_value(text);
                 }
             }

@@ -104,7 +104,9 @@ fn table_count(
             .build()?
             .to_arrow()
             .await?
-            .try_fold(0u64, |rows, batch| async move { Ok(rows + batch.num_rows() as u64) })
+            .try_fold(0u64, |rows, batch| async move {
+                Ok(rows + batch.num_rows() as u64)
+            })
             .await?;
         Ok(rows)
     }))
