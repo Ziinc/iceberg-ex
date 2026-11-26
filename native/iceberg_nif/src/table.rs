@@ -1,7 +1,7 @@
 //! `Iceberg.Table`: metadata, scans, data file writes and fast appends.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
@@ -21,6 +21,7 @@ use iceberg::writer::partitioning::PartitioningWriter;
 use iceberg::writer::{IcebergWriter, IcebergWriterBuilder};
 use iceberg::Catalog;
 use rustler::{Atom, Binary, Env, NifMap, NifResult, ResourceArc, Term};
+use uuid::Uuid;
 
 use crate::batches;
 use crate::error::Error;
@@ -201,6 +202,18 @@ async fn write(
     }
 }
 
+// Commits to one table from this node are taken one at a time, whichever
+// handle they come from: concurrent ones otherwise conflict, and with
+// iceberg-rust's few, unjittered retries some fail. Other writers are still
+// handled by those retries.
+static COMMIT_LOCKS: LazyLock<Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(Default::default);
+
+fn commit_lock(table: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+    let mut locks = COMMIT_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    locks.entry(table).or_default().clone()
+}
+
 #[rustler::nif]
 fn table_fast_append(
     env: Env,
@@ -216,6 +229,8 @@ fn table_fast_append(
             .iter()
             .flat_map(|f| f.0.iter().cloned())
             .collect::<Vec<_>>();
+        let lock = commit_lock(t.table.metadata().uuid());
+        let _held = lock.lock().await;
         let tx = Transaction::new(&t.table);
         let tx = tx
             .fast_append()

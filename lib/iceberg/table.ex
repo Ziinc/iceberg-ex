@@ -24,9 +24,17 @@ defmodule Iceberg.Table do
   The table's metadata in the Iceberg spec's JSON shape (string keys:
   `"format-version"`, `"current-schema-id"`, `"schemas"`, `"partition-specs"`,
   `"current-snapshot-id"`, `"snapshots"` with their `"summary"`, `"properties"`, ...).
+  `"snapshots"` are in commit order.
   """
   @spec metadata(t()) :: map()
-  def metadata(%__MODULE__{resource: resource}), do: Native.table_metadata(resource)
+  def metadata(%__MODULE__{resource: resource}) do
+    # iceberg-rust keeps snapshots in a hash map, so they serialize in no order.
+    resource
+    |> Native.table_metadata()
+    |> Map.replace_lazy("snapshots", fn snapshots ->
+      Enum.sort_by(snapshots, &{&1["sequence-number"] || 0, &1["timestamp-ms"]})
+    end)
+  end
 
   @doc "Reloads the table from its catalog."
   @spec refresh(t(), keyword()) :: result(t())
