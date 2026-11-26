@@ -154,6 +154,53 @@ defmodule Iceberg.TableTest do
     assert {:error, %Error{kind: :data_invalid}} = Table.append(table, "not arrow")
   end
 
+  test "count/2 counts the rows a filter matches", %{table: table} do
+    assert Table.count(table) == {:ok, 0}
+    {:ok, table} = Table.append(table, events([1, 2, 3]))
+
+    assert Table.count(table) == {:ok, 3}
+    assert Table.count(table, filter: {:>, "id", 1}) == {:ok, 2}
+    assert Table.count(table, filter: {:and, {:==, "name", "n3"}, {:>=, "id", 3}}) == {:ok, 1}
+    assert Table.count(table, filter: {:==, "name", "none"}) == {:ok, 0}
+  end
+
+  test "columns given as lists are appended, cast to the table's types", %{table: table} do
+    us = DateTime.to_unix(~U[2026-11-19 10:00:00.000001Z], :microsecond)
+    columns = %{"id" => [1, 2], "name" => ["a", nil], "ts" => [us, nil]}
+    assert {:ok, table} = Table.append(table, columns)
+
+    {:ok, ipc} = Table.scan(table)
+
+    rows =
+      ipc
+      |> DF.load_ipc_stream!()
+      |> DF.to_rows()
+      |> Enum.map(&Map.update!(&1, "ts", fn ts -> ts && DateTime.to_unix(ts, :microsecond) end))
+      |> Enum.sort_by(& &1["id"])
+
+    assert rows == [
+             %{"id" => 1, "name" => "a", "ts" => us},
+             %{"id" => 2, "name" => nil, "ts" => nil}
+           ]
+  end
+
+  test "columns that do not fit together or with the table are refused", %{table: table} do
+    for {columns, reason} <- [
+          {%{"id" => [1, 2], "name" => ["a"]}, "has 1 values, another has 2"},
+          {%{"id" => [1, "2"]}, "mixes"},
+          {%{"id" => [1], "name" => [<<255>>]}, "not UTF-8"},
+          {%{"id" => [1], "name" => [:a]}, "unsupported value :a"},
+          {%{"id" => 1}, "must be a list"},
+          {%{"id" => [1], "extra" => [1]}, "unknown column extra"},
+          {%{}, "no columns"}
+        ] do
+      assert {:error, %Error{kind: :data_invalid, message: message}} =
+               Table.append(table, columns)
+
+      assert message =~ reason, inspect(columns)
+    end
+  end
+
   test "partitioned tables are written one file per partition", %{catalog: catalog} do
     {:ok, table} =
       Catalog.create_table(catalog, "analytics", "parted", events_schema(),

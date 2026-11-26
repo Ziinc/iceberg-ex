@@ -7,9 +7,10 @@ Rustler NIF.
 - Catalogs: Iceberg REST, Amazon S3 Tables, in-memory
 - Namespaces and tables: create (partitioned or not), list, load, rename, drop
 - Scans with column selection, row filters and time travel, as Arrow IPC or an
-  `Explorer.DataFrame`
-- Appends: Parquet data files written separately from the commit, then
-  fast-appended with custom snapshot summary properties
+  `Explorer.DataFrame`, and row counts
+- Appends from columns (a map of lists), Arrow IPC or an `Explorer.DataFrame`:
+  Parquet data files written separately from the commit, then fast-appended
+  with custom snapshot summary properties
 
 Calls run on the NIF's own Tokio runtime and reply by message, so long catalog
 or storage requests never hold a BEAM scheduler.
@@ -55,12 +56,14 @@ schema =
 {:ok, table} =
   Iceberg.Catalog.create_table(catalog, "web", "events", schema, partition_by: [{"ts", :day}])
 
-# Append: data is an Arrow IPC stream binary or an Explorer.DataFrame.
-{:ok, table} = Iceberg.Table.append(table, DF.new(%{"id" => [1, 2], "name" => ["a", "b"]}))
+# Append: data is columns, an Arrow IPC stream binary or an Explorer.DataFrame.
+{:ok, table} = Iceberg.Table.append(table, %{"id" => [1, 2], "name" => ["a", nil]})
+{:ok, table} = Iceberg.Table.append(table, DF.new(%{"id" => [3], "name" => ["c"]}))
 
 # Scan
 {:ok, ipc} = Iceberg.Table.scan(table, select: ["id"], filter: {:>, "id", 1})
 {:ok, df} = Iceberg.Table.to_dataframe(table, filter: {:==, "name", "a"})
+{:ok, 1} = Iceberg.Table.count(table, filter: {:==, "name", "a"})
 
 # Write files now, commit later (or from one process per table).
 {:ok, files} = Iceberg.Table.write_data_files(table, df, file_prefix: "batch-42")

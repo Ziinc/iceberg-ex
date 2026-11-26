@@ -20,12 +20,12 @@ use iceberg::writer::partitioning::fanout_writer::FanoutWriter;
 use iceberg::writer::partitioning::PartitioningWriter;
 use iceberg::writer::{IcebergWriter, IcebergWriterBuilder};
 use iceberg::Catalog;
-use rustler::{Atom, Binary, Env, NifMap, NifResult, ResourceArc, Term};
+use rustler::{Atom, Env, NifMap, NifResult, ResourceArc, Term};
 use uuid::Uuid;
 
 use crate::batches;
 use crate::error::Error;
-use crate::term::{Bin, Json, SavedBinary};
+use crate::term::{Bin, Data, Json};
 use crate::{filter, spawn};
 
 /// A loaded table and the catalog it commits to.
@@ -71,6 +71,43 @@ fn table_refresh(env: Env, r: Term, timeout: Option<u64>, t: TableArc) -> Atom {
         let table = t.catalog.load_table(t.table.identifier()).await?;
         Ok(TableResource::new(t.catalog.clone(), table))
     })
+}
+
+/// The rows `filter` matches, reading only `columns` (the filter's).
+#[rustler::nif]
+#[allow(clippy::too_many_arguments)]
+fn table_count(
+    env: Env,
+    r: Term,
+    timeout: Option<u64>,
+    t: TableArc,
+    columns: Vec<String>,
+    filter: Term,
+    snapshot_id: Option<i64>,
+    case_sensitive: bool,
+) -> NifResult<Atom> {
+    let filter = filter::decode(filter)?;
+    Ok(spawn(env, r, timeout, async move {
+        let mut scan = t.table.scan().with_case_sensitive(case_sensitive);
+        scan = if columns.is_empty() {
+            scan.select_empty()
+        } else {
+            scan.select(&columns)
+        };
+        if let Some(predicate) = filter {
+            scan = scan.with_filter(predicate);
+        }
+        if let Some(id) = snapshot_id {
+            scan = scan.snapshot_id(id);
+        }
+        let rows = scan
+            .build()?
+            .to_arrow()
+            .await?
+            .try_fold(0u64, |rows, batch| async move { Ok(rows + batch.num_rows() as u64) })
+            .await?;
+        Ok(rows)
+    }))
 }
 
 #[rustler::nif]
@@ -133,14 +170,14 @@ fn table_write(
     r: Term,
     timeout: Option<u64>,
     t: TableArc,
-    ipc: Binary,
+    data: Term,
     prefix: Option<String>,
     props: HashMap<String, String>,
-) -> Atom {
-    let ipc = SavedBinary::new(ipc);
-    spawn(env, r, timeout, async move {
-        let batches = ipc.with(batches::from_ipc)?;
-        drop(ipc);
+) -> NifResult<Atom> {
+    let data = Data::new(data)?;
+    Ok(spawn(env, r, timeout, async move {
+        let batches = data.batches()?;
+        drop(data);
         let prefix = prefix.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let files = write(&t.table, batches, prefix, props).await?;
         let info = files
@@ -152,7 +189,7 @@ fn table_write(
             })
             .collect::<Vec<_>>();
         Ok((ResourceArc::new(DataFiles(files)), info))
-    })
+    }))
 }
 
 /// Writes `batches` as Parquet under the table's data location with the

@@ -1,15 +1,23 @@
-//! Arrow IPC streams in and out, and incoming batches fitted to a table's schema.
+//! Arrow IPC streams in and out, columns of Elixir values in, and incoming
+//! batches fitted to a table's schema.
 
 use std::collections::HashSet;
 use std::io::Cursor;
+use std::sync::Arc;
 
+use arrow_array::builder::StringBuilder;
 use arrow_array::cast::AsArray;
 use arrow_array::types::Float64Type;
-use arrow_array::{new_null_array, ArrayRef, RecordBatch, RecordBatchOptions};
+use arrow_array::{
+    new_null_array, ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch,
+    RecordBatchOptions,
+};
 use arrow_cast::{cast_with_options, CastOptions};
 use arrow_ipc::reader::StreamReader;
 use arrow_ipc::writer::StreamWriter;
-use arrow_schema::{DataType, SchemaRef};
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
+use rustler::types::map::MapIterator;
+use rustler::{Binary, Term, TermType};
 
 use crate::error::Error;
 
@@ -75,6 +83,144 @@ fn take_i32(rest: &mut &[u8]) -> Option<i32> {
     let (head, tail) = rest.split_first_chunk::<4>()?;
     *rest = tail;
     Some(i32::from_le_bytes(*head))
+}
+
+/// A batch from `%{name => values}`: each list one column, all the same
+/// length, of binaries (UTF-8), integers, floats (integers allowed among
+/// them), booleans or nil. `conform/2` then casts each to the table's type.
+pub fn from_columns(term: Term) -> Result<RecordBatch, Error> {
+    let columns = MapIterator::new(term).ok_or_else(|| Error::invalid("columns must be a map"))?;
+    let (mut fields, mut arrays, mut rows) = (Vec::new(), Vec::new(), None);
+
+    for (key, values) in columns {
+        let name: String = key
+            .decode()
+            .map_err(|_| Error::invalid("column names must be strings"))?;
+        let values: Vec<Term> = values
+            .decode()
+            .map_err(|_| Error::invalid(format!("column {name}: values must be a list")))?;
+        match rows {
+            Some(n) if n != values.len() => {
+                return Err(Error::invalid(format!(
+                    "column {name} has {} values, another has {n}",
+                    values.len()
+                )))
+            }
+            _ => rows = Some(values.len()),
+        }
+        let array = column(&name, &values)?;
+        fields.push(Field::new(name, array.data_type().clone(), true));
+        arrays.push(array);
+    }
+
+    let Some(rows) = rows else {
+        return Err(Error::invalid("no columns"));
+    };
+    let options = RecordBatchOptions::new().with_row_count(Some(rows));
+    Ok(RecordBatch::try_new_with_options(
+        Arc::new(Schema::new(fields)),
+        arrays,
+        &options,
+    )?)
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Kind {
+    Null,
+    Bool,
+    Int,
+    Float,
+    Str,
+}
+
+fn kind(name: &str, value: Term) -> Result<Kind, Error> {
+    Ok(match value.get_type() {
+        TermType::Binary => Kind::Str,
+        TermType::Integer => Kind::Int,
+        TermType::Float => Kind::Float,
+        TermType::Atom => match value
+            .atom_to_string()
+            .map_err(|_| Error::invalid(format!("column {name}: unsupported value")))?
+            .as_str()
+        {
+            "nil" => Kind::Null,
+            "true" | "false" => Kind::Bool,
+            other => {
+                return Err(Error::invalid(format!(
+                    "column {name}: unsupported value :{other}"
+                )))
+            }
+        },
+        other => {
+            return Err(Error::invalid(format!(
+                "column {name}: unsupported value of type {other:?}"
+            )))
+        }
+    })
+}
+
+// One kind per column; integers among floats are floats, and nil fits any.
+fn column(name: &str, values: &[Term]) -> Result<ArrayRef, Error> {
+    let mut column = Kind::Null;
+    for &value in values {
+        column = match (column, kind(name, value)?) {
+            (c, Kind::Null) => c,
+            (Kind::Null, k) => k,
+            (c, k) if c == k => c,
+            (Kind::Int, Kind::Float) | (Kind::Float, Kind::Int) => Kind::Float,
+            (c, k) => {
+                return Err(Error::invalid(format!(
+                    "column {name} mixes {c:?} and {k:?} values"
+                )))
+            }
+        };
+    }
+
+    let nil = |v: &Term| v.get_type() == TermType::Atom && v.atom_to_string().ok().as_deref() == Some("nil");
+    let out_of_range = || Error::invalid(format!("column {name}: an integer is outside 64 bits"));
+
+    Ok(match column {
+        Kind::Null => new_null_array(&DataType::Null, values.len()),
+        Kind::Bool => Arc::new(
+            values
+                .iter()
+                .map(|v| if nil(v) { None } else { v.decode::<bool>().ok() })
+                .collect::<BooleanArray>(),
+        ),
+        Kind::Int => Arc::new(
+            values
+                .iter()
+                .map(|v| if nil(v) { Ok(None) } else { v.decode::<i64>().map(Some).map_err(|_| out_of_range()) })
+                .collect::<Result<Int64Array, _>>()?,
+        ),
+        Kind::Float => Arc::new(
+            values
+                .iter()
+                .map(|v| match v.get_type() {
+                    TermType::Float => v.decode::<f64>().map(Some).map_err(|_| out_of_range()),
+                    TermType::Integer => v.decode::<i64>().map(|i| Some(i as f64)).map_err(|_| out_of_range()),
+                    _ => Ok(None),
+                })
+                .collect::<Result<Float64Array, _>>()?,
+        ),
+        Kind::Str => {
+            let bytes = values.iter().map(|v| v.decode::<Binary>().map(|b| b.len()).unwrap_or(0)).sum();
+            let mut builder = StringBuilder::with_capacity(values.len(), bytes);
+            for v in values {
+                if nil(v) {
+                    builder.append_null();
+                } else {
+                    let binary = v
+                        .decode::<Binary>()
+                        .map_err(|_| Error::invalid(format!("column {name}: a value is not a binary")))?;
+                    let text = std::str::from_utf8(binary.as_slice())
+                        .map_err(|_| Error::invalid(format!("column {name}: a value is not UTF-8")))?;
+                    builder.append_value(text);
+                }
+            }
+            Arc::new(builder.finish())
+        }
+    })
 }
 
 pub fn to_ipc(schema: &SchemaRef, batches: &[RecordBatch]) -> Result<Vec<u8>, Error> {
