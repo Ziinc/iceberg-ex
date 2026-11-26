@@ -100,6 +100,36 @@ defmodule Iceberg.TableTest do
     assert ipc |> ids() |> Enum.sort() == [1, 2]
   end
 
+  test "concurrent appends to one table from one node all commit", %{catalog: catalog} do
+    # Two handles on one table: commits are serialized by table, not by handle.
+    {:ok, other} = Catalog.load_table(catalog, "analytics", "events")
+    {:ok, table} = Catalog.load_table(catalog, "analytics", "events")
+
+    results =
+      1..24
+      |> Enum.map(fn i ->
+        handle = if rem(i, 2) == 0, do: table, else: other
+        Task.async(fn -> Table.append(handle, events([i])) end)
+      end)
+      |> Task.await_many(120_000)
+
+    assert Enum.all?(results, &match?({:ok, _}, &1)),
+           inspect(Enum.reject(results, &match?({:ok, _}, &1)))
+
+    {:ok, table} = Table.refresh(table)
+    assert length(Table.metadata(table)["snapshots"]) == 24
+  end
+
+  test "metadata lists snapshots in commit order", %{table: table} do
+    table = Enum.reduce(1..6, table, fn i, t -> elem(Table.append(t, events([i])), 1) end)
+    metadata = Table.metadata(table)
+
+    assert Enum.map(metadata["snapshots"], & &1["sequence-number"]) == Enum.to_list(1..6)
+
+    assert Enum.map(metadata["snapshots"], & &1["snapshot-id"]) ==
+             Enum.map(metadata["snapshot-log"], & &1["snapshot-id"])
+  end
+
   test "input columns are cast to the table's types, missing nullable ones are null",
        %{table: table} do
     df = DF.new(%{"id" => Explorer.Series.from_list([7], dtype: :s32)})
