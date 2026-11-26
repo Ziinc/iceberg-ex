@@ -27,9 +27,9 @@ defmodule Iceberg.EdgeCasesTest do
       assert Map.get(Table.metadata(table), "snapshots", []) == []
     end
 
-    test "data must be an Arrow IPC stream or a DataFrame", %{table: table} do
-      assert_raise ArgumentError, ~r/expected an Arrow IPC stream binary/, fn ->
-        Table.append(table, %{"id" => [1]})
+    test "data must be columns, an Arrow IPC stream or a DataFrame", %{table: table} do
+      assert_raise ArgumentError, ~r/expected an Arrow IPC stream binary, a map of columns/, fn ->
+        Table.append(table, [%{"id" => 1}])
       end
     end
 

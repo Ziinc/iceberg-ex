@@ -48,6 +48,17 @@ defmodule Iceberg.Filter do
   defp normalize(other, _depth),
     do: raise(ArgumentError, "unsupported filter #{inspect(other, limit: 5)}")
 
+  @doc false
+  # The columns a normalized filter reads.
+  def columns(nil), do: []
+  def columns(filter), do: filter |> columns([]) |> Enum.uniq()
+
+  defp columns(bool, acc) when is_boolean(bool), do: acc
+  defp columns({op, a, b}, acc) when op in [:and, :or], do: columns(b, columns(a, acc))
+  defp columns({:not, a}, acc), do: columns(a, acc)
+  defp columns({_op, column, _value}, acc), do: [column | acc]
+  defp columns({_op, column}, acc), do: [column | acc]
+
   @epoch ~N[1970-01-01 00:00:00]
 
   defp value(v) when is_integer(v) and v in -0x8000000000000000..0x7FFFFFFFFFFFFFFF, do: v

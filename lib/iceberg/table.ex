@@ -4,7 +4,8 @@ defmodule Iceberg.Table do
 
   Table data crosses into and out of Elixir as an
   [Arrow IPC stream](https://arrow.apache.org/docs/format/Columnar.html#ipc-streaming-format)
-  binary. With the optional `:explorer` dependency, appends also take an
+  binary. Appends also take columns as a map of column name to a list of
+  values. With the optional `:explorer` dependency, appends also take an
   `Explorer.DataFrame` and `to_dataframe/2` loads a scan.
 
   A table value is a snapshot of the table's metadata at load or commit time;
@@ -17,7 +18,7 @@ defmodule Iceberg.Table do
   defstruct [:resource, :namespace, :name]
 
   @type t :: %__MODULE__{resource: reference(), namespace: [String.t()], name: String.t()}
-  @type data :: binary() | struct()
+  @type data :: binary() | %{String.t() => list()} | struct()
   @type result(ok) :: {:ok, ok} | {:error, Iceberg.Error.t()}
 
   @doc """
@@ -76,10 +77,41 @@ defmodule Iceberg.Table do
   end
 
   @doc """
+  Counts the rows that `:filter` matches (all rows without one), reading only
+  the filter's columns.
+
+  Options: `:filter` (see `Iceberg.Filter`), `:snapshot_id`,
+  `:case_sensitive` (default `true`) and `:timeout`.
+  """
+  @spec count(t(), keyword()) :: result(non_neg_integer())
+  def count(%__MODULE__{} = table, opts \\ []) do
+    filter = Filter.normalize(opts[:filter])
+
+    Native.call(opts, fn ref, timeout ->
+      Native.table_count(
+        ref,
+        timeout,
+        table.resource,
+        Filter.columns(filter),
+        filter,
+        opts[:snapshot_id],
+        Keyword.get(opts, :case_sensitive, true)
+      )
+    end)
+  end
+
+  @doc """
   Writes `data` as Parquet data files in the table's location, without
   committing them. Columns are matched to the table's by name and cast to
   their types; a missing optional column is written as nulls. Partitioned
   tables get a file per partition.
+
+  `data` is an Arrow IPC stream binary, an `Explorer.DataFrame`, or columns:
+  a map of column name to a list of values, every list the same length. A
+  column's values are binaries (UTF-8 strings), integers, floats (integers
+  may be among them), booleans or `nil`; give dates, times and timestamps
+  as integers in the column's unit (days, or microseconds, or nanoseconds
+  for the `_ns` types).
 
   Options:
 
@@ -95,10 +127,10 @@ defmodule Iceberg.Table do
   def write_data_files(%__MODULE__{} = table, data, opts \\ []) do
     props = Keyword.get(opts, :properties, %{})
     prefix = file_prefix(opts[:file_prefix])
-    ipc = ipc(data)
+    data = data(data)
 
     with {:ok, {resource, files}} <-
-           Native.call(opts, &Native.table_write(&1, &2, table.resource, ipc, prefix, props)) do
+           Native.call(opts, &Native.table_write(&1, &2, table.resource, data, prefix, props)) do
       {:ok, %DataFiles{resource: resource, files: files}}
     end
   end
@@ -159,16 +191,17 @@ defmodule Iceberg.Table do
       with {:ok, ipc} <- scan(table, opts), do: Explorer.DataFrame.load_ipc_stream(ipc)
     end
 
-    defp ipc(%Explorer.DataFrame{} = df), do: Explorer.DataFrame.dump_ipc_stream!(df)
+    defp data(%Explorer.DataFrame{} = df), do: Explorer.DataFrame.dump_ipc_stream!(df)
   end
 
-  defp ipc(data) when is_binary(data), do: data
+  defp data(data) when is_binary(data), do: data
+  defp data(columns) when is_map(columns) and not is_struct(columns), do: columns
 
   @accepted if Code.ensure_loaded?(Explorer.DataFrame),
-              do: "an Arrow IPC stream binary or an Explorer.DataFrame",
-              else: "an Arrow IPC stream binary"
+              do: "an Arrow IPC stream binary, a map of columns or an Explorer.DataFrame",
+              else: "an Arrow IPC stream binary or a map of columns"
 
-  defp ipc(other),
+  defp data(other),
     do: raise(ArgumentError, "expected #{@accepted}, got: #{inspect(other, limit: 3)}")
 
   defp select(nil), do: nil

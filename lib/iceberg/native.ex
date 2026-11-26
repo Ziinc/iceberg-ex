@@ -48,6 +48,7 @@ defmodule Iceberg.Native do
   end
 
   def catalog_new(_ref, _timeout, _kind, _name, _props), do: err()
+  def table_count(_ref, _timeout, _table, _columns, _filter, _snapshot_id, _sensitive), do: err()
   def list_namespaces(_ref, _timeout, _catalog, _parent), do: err()
   def create_namespace(_ref, _timeout, _catalog, _ns, _props), do: err()
   def get_namespace(_ref, _timeout, _catalog, _ns), do: err()

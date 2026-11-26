@@ -98,6 +98,39 @@ impl Encoder for Bin {
     }
 }
 
+/// Data to write, kept for decoding off the scheduler: an Arrow IPC stream
+/// binary (not copied), or a map of column name to values (copied as terms;
+/// their binaries are shared, not copied).
+pub enum Data {
+    Ipc(SavedBinary),
+    Columns(OwnedEnv, SavedTerm),
+}
+
+impl Data {
+    pub fn new(term: Term) -> NifResult<Self> {
+        match term.get_type() {
+            TermType::Binary => Ok(Data::Ipc(SavedBinary::new(term.decode()?))),
+            TermType::Map => {
+                let env = OwnedEnv::new();
+                let saved = env.save(term);
+                Ok(Data::Columns(env, saved))
+            }
+            _ => Err(arg_error(
+                "data must be an Arrow IPC stream binary or a map of columns".to_string(),
+            )),
+        }
+    }
+
+    pub fn batches(&self) -> Result<Vec<arrow_array::RecordBatch>, crate::error::Error> {
+        match self {
+            Data::Ipc(binary) => binary.with(crate::batches::from_ipc),
+            Data::Columns(env, term) => {
+                env.run(|env| crate::batches::from_columns(term.load(env)).map(|b| vec![b]))
+            }
+        }
+    }
+}
+
 /// An Elixir binary kept alive (not copied) for reading off the scheduler.
 pub struct SavedBinary {
     env: OwnedEnv,
